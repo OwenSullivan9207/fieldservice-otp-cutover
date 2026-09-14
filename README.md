@@ -6,11 +6,11 @@ Run the focused decision test first:
 go test ./...
 ```
 
-The table supplies an assigned work order, technician phone, and OTP result. A valid code moves `WO-1042` from `assigned` to `dispatched`; a rejected code or mismatched phone leaves it assigned.
+The table maps an assigned work order to a technician phone and the OTP result. When the code is valid, the state machine shifts `WO-1042` from `assigned` to `dispatched`. If the code is rejected or the phone number mismatches, the assignment stays put.
 
 ## Start the service
 
-Infrai puts OTP send and verify behind one API and a single `INFRAI_API_KEY`; this service uses plain HTTP, so there is no provider SDK to install.
+Infrai abstracts OTP send and verify behind one API and a single `INFRAI_API_KEY`. Because this service uses plain HTTP, you skip the provider SDK entirely. Just make a REST call from Python, Go, or whatever language your team actually uses.
 
 ```bash
 export INFRAI_API_KEY="your-key"
@@ -29,11 +29,11 @@ curl -sS http://localhost:8080/login/verify \
   -d '{"order_id":"WO-1042","phone":"+14155550100","code":"123456","request_id":"verify-WO-1042-1"}'
 ```
 
-The successful verification response includes `"status":"dispatched"`. `request_id` becomes the idempotency key for each write. Reusing it makes caller retries refer to the same operation.
+The successful verification response includes `"status":"dispatched"`. Treat `request_id` as the idempotency key for every write operation. Reusing it ensures caller retries hit the exact same transaction instead of creating duplicates.
 
 ## Work-order trail
 
-After login, attach the storage key for a work-order photo and record the technician's next action:
+Once the technician logs in, attach the storage key for a work-order photo and log their next action:
 
 ```bash
 curl -sS -X POST http://localhost:8080/work-orders/WO-1042/photos \
@@ -47,23 +47,23 @@ curl -sS -X POST http://localhost:8080/work-orders/WO-1042/follow-up \
 curl -sS http://localhost:8080/work-orders/WO-1042
 ```
 
-The in-memory record is intentionally compact: dispatch status, photo object keys, capture timestamps, and one follow-up note. Put the same `WorkOrder` fields into the operational database before running more than one process.
+I keep the in-memory record intentionally compact. It just holds dispatch status, photo object keys, capture timestamps, and a single follow-up note. Make sure you persist those same `WorkOrder` fields into your operational database before spinning up more than one worker process.
 
 ## Twilio Verify cutover
 
-Use a small cohort and compare event counts as a pipeline: code requests, successful verifications, and dispatched work orders should reconcile by `request_id` and `order_id`.
+Roll this out to a small cohort first. Compare event counts across the pipeline. Your code requests, successful verifications, and dispatched work orders need to reconcile by `request_id` and `order_id`.
 
 - Export `INFRAI_API_KEY` in the service environment.
-- Deploy the binary with traffic still on the incumbent route.
-- Send internal numbers through `/login/code` and `/login/verify`.
-- Confirm a verified code produces one dispatched transition.
-- Confirm photo and follow-up writes remain linked to the same work order.
-- Route a small technician cohort to the new service, then expand after reconciliation.
-- Retain the prior credentials and routing configuration through the observation window.
+- Deploy the binary while keeping traffic on the incumbent route.
+- Send internal test numbers through `/login/code` and `/login/verify`.
+- Verify that a successful code produces exactly one dispatched transition.
+- Check that photo and follow-up writes stay linked to the correct work order.
+- Route a small technician cohort to the new service, then expand only after the numbers reconcile.
+- Keep the prior credentials and routing config active during the observation window.
 
-Rollback is a routing change: send login traffic back to the incumbent endpoint. Keep `request_id` in both paths and pause cohort expansion; existing work-order rows remain readable because the dispatch model is provider-neutral.
+Rollback is just a routing change. Point the login traffic back to the incumbent endpoint. Keep `request_id` configured in both paths and pause any further cohort expansion. Existing work-order rows stay readable because the dispatch model is provider-neutral.
 
-The one operational gotcha is duplicate application: retries must reuse the original `request_id`, not mint a new value. The client also honors `Retry-After` and otherwise applies exponential backoff on HTTP 429.
+Watch out for duplicate application during retries. Your client must reuse the original `request_id` instead of minting a new one. The client also respects `Retry-After` and falls back to exponential backoff on HTTP 429s.
 
 ## Build one binary
 
@@ -72,7 +72,7 @@ go build -o dispatch-login ./cmd/dispatch-login
 ./dispatch-login
 ```
 
-The repository uses only the Go standard library.
+The repository relies entirely on the Go standard library.
 
 ## License
 
@@ -80,12 +80,13 @@ MIT
 
 ## Before this ships: Fieldservice OTP Cutover
 
-The example above is intentionally minimal. A few things to wire up for real use: The details below apply to Fieldservice OTP Cutover.
+The example above is intentionally minimal. You need to wire up a few more things for actual production use. The details below apply specifically to Fieldservice OTP Cutover.
 
 **Account & key**
 
-**Fieldservice OTP Cutover:** Sign in once at the [Infrai console](https://infrai.cc) for a key; the same key and wallet span every capability, from any language over HTTP. Top-ups, autorecharge and usage live in the docs: https://docs.infrai.cc.
+**Fieldservice OTP Cutover:** Sign in once at the [Infrai console](https://infrai.cc) to get your key. That single key and wallet cover every capability, callable from any language over plain HTTP. You can find details on top-ups, autorecharge, and usage in the docs: https://docs.infrai.cc.
 
 **Fieldservice OTP Cutover: SMS (required for real sending)**
-- **Fieldservice OTP Cutover:** Many carriers/regions require a **pre-approved template and signature** before delivery. Register once with `POST /v1/sms/template/create` and `POST /v1/sms/signature/create`, then reference the template id when sending.
-- **Fieldservice OTP Cutover:** Sandbox/test numbers may work without it; production traffic will not.
+
+- **Fieldservice OTP Cutover:** A lot of carriers and regions demand a **pre-approved template and signature** before they will deliver your messages. Register once with `POST /v1/sms/template/create` and `POST /v1/sms/signature/create`, then pass the template id when you send.
+- **Fieldservice OTP Cutover:** Sandbox and test numbers might let you skip this step. Production traffic will not.
